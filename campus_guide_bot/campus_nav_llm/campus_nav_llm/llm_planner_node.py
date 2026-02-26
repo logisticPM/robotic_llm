@@ -10,12 +10,29 @@ import json
 import os
 import threading
 import logging
+from pathlib import Path
 
 from openai import OpenAI
 
 from campus_nav_llm.location_resolver import LocationResolver, load_semantic_map
 
 logger = logging.getLogger(__name__)
+
+# Auto-load .env file if it exists (searches current dir and package dir)
+def _load_dotenv():
+    for search_dir in [Path.cwd(), Path(__file__).parent.parent, Path.home()]:
+        env_file = search_dir / ".env"
+        if env_file.exists():
+            with open(env_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, _, value = line.partition("=")
+                    os.environ.setdefault(key.strip(), value.strip())
+            logger.info("Loaded .env from %s", env_file)
+            return
+_load_dotenv()
 
 MAX_TOOL_ITERATIONS = 10
 
