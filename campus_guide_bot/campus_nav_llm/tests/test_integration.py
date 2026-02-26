@@ -1,6 +1,6 @@
 """Integration test — simulates the full Phase 1 pipeline.
 
-No ROS, no real Claude API. Tests that LLMPlannerCore + TaskExecutorCore
+No ROS, no real LLM API. Tests that LLMPlannerCore + TaskExecutorCore
 work together correctly via mock API responses.
 """
 import json
@@ -20,49 +20,61 @@ def system(sample_semantic_map):
     return planner, executor
 
 
-def _make_tool_block(name, inp, tool_id="t1"):
-    block = MagicMock()
-    block.type = "tool_use"
-    block.name = name
-    block.input = inp
-    block.id = tool_id
-    return block
+# ── Mock helpers for OpenAI-compatible responses ──
+
+def _make_tool_call(name, arguments, tc_id="t1"):
+    tc = MagicMock()
+    tc.id = tc_id
+    tc.type = "function"
+    tc.function = MagicMock()
+    tc.function.name = name
+    tc.function.arguments = json.dumps(arguments)
+    return tc
 
 
-def _make_text_block(text):
-    block = MagicMock()
-    block.type = "text"
-    block.text = text
-    return block
+def _make_choice(finish_reason, content=None, tool_calls=None):
+    choice = MagicMock()
+    choice.finish_reason = finish_reason
+    choice.message = MagicMock()
+    choice.message.content = content
+    choice.message.tool_calls = tool_calls
+    choice.message.model_dump = MagicMock(return_value={
+        "role": "assistant",
+        "content": content,
+        "tool_calls": [
+            {"id": tc.id, "type": "function",
+             "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+            for tc in (tool_calls or [])
+        ] if tool_calls else None,
+    })
+    return choice
 
 
-def _make_response(stop_reason, content):
+def _make_response(finish_reason, content=None, tool_calls=None):
     resp = MagicMock()
-    resp.stop_reason = stop_reason
-    resp.content = content
+    resp.choices = [_make_choice(finish_reason, content, tool_calls)]
     return resp
 
 
 class TestEndToEndNavigation:
-    """User says 'go to whiteboard' → LLM calls navigate_to → executor navigates → LLM replies."""
+    """User says 'go to whiteboard' -> LLM calls navigate_to -> executor navigates -> LLM replies."""
 
     def test_single_navigation(self, system):
         planner, executor = system
 
         # Step 1: LLM decides to call navigate_to
-        nav_block = _make_tool_block("navigate_to", {"location_name": "whiteboard"})
-        tool_resp = _make_response("tool_use", [nav_block])
+        tc1 = _make_tool_call("navigate_to", {"location_name": "whiteboard"})
+        tool_resp = _make_response("tool_calls", tool_calls=[tc1])
 
         # Step 2: LLM sees the result and speaks
-        speak_block = _make_tool_block("speak", {"text": "I've arrived at the whiteboard!"}, "t2")
-        speak_resp = _make_response("tool_use", [speak_block])
+        tc2 = _make_tool_call("speak", {"text": "I've arrived at the whiteboard!"}, "t2")
+        speak_resp = _make_response("tool_calls", tool_calls=[tc2])
 
         # Step 3: LLM finishes
-        text_block = _make_text_block("Done! I'm at the whiteboard now.")
-        final_resp = _make_response("end_turn", [text_block])
+        final_resp = _make_response("stop", content="Done! I'm at the whiteboard now.")
 
         with patch.object(
-            planner.client.messages,
+            planner.client.chat.completions,
             "create",
             side_effect=[tool_resp, speak_resp, final_resp],
         ):
@@ -74,22 +86,21 @@ class TestEndToEndNavigation:
 
 
 class TestMultiStepNavigation:
-    """User says 'go to desk 1 then entrance' → 2 navigations."""
+    """User says 'go to desk 1 then entrance' -> 2 navigations."""
 
     def test_two_step_navigation(self, system):
         planner, executor = system
 
         # Step 1: navigate to desk_1
-        nav1 = _make_tool_block("navigate_to", {"location_name": "desk_1"}, "t1")
-        resp1 = _make_response("tool_use", [nav1])
+        tc1 = _make_tool_call("navigate_to", {"location_name": "desk_1"}, "t1")
+        resp1 = _make_response("tool_calls", tool_calls=[tc1])
 
         # Step 2: navigate to entrance
-        nav2 = _make_tool_block("navigate_to", {"location_name": "entrance"}, "t2")
-        resp2 = _make_response("tool_use", [nav2])
+        tc2 = _make_tool_call("navigate_to", {"location_name": "entrance"}, "t2")
+        resp2 = _make_response("tool_calls", tool_calls=[tc2])
 
         # Step 3: done
-        text = _make_text_block("Visited desk 1 and entrance.")
-        resp3 = _make_response("end_turn", [text])
+        resp3 = _make_response("stop", content="Visited desk 1 and entrance.")
 
         call_log = []
 
@@ -99,7 +110,7 @@ class TestMultiStepNavigation:
             return result
 
         with patch.object(
-            planner.client.messages,
+            planner.client.chat.completions,
             "create",
             side_effect=[resp1, resp2, resp3],
         ):
@@ -115,20 +126,19 @@ class TestMultiStepNavigation:
 
 
 class TestPositionQuery:
-    """User asks 'where am I?' → LLM calls get_robot_position."""
+    """User asks 'where am I?' -> LLM calls get_robot_position."""
 
     def test_position_query(self, system):
         planner, executor = system
         executor.update_pose(2.0, 3.5, 1.57)
 
-        pos_block = _make_tool_block("get_robot_position", {})
-        pos_resp = _make_response("tool_use", [pos_block])
+        tc = _make_tool_call("get_robot_position", {})
+        pos_resp = _make_response("tool_calls", tool_calls=[tc])
 
-        text = _make_text_block("You are near the whiteboard at (2.0, 3.5).")
-        final_resp = _make_response("end_turn", [text])
+        final_resp = _make_response("stop", content="You are near the whiteboard at (2.0, 3.5).")
 
         with patch.object(
-            planner.client.messages,
+            planner.client.chat.completions,
             "create",
             side_effect=[pos_resp, final_resp],
         ):
@@ -140,24 +150,24 @@ class TestPositionQuery:
 
 
 class TestUnknownLocationHandling:
-    """User asks to go to a non-existent location → error, LLM handles it."""
+    """User asks to go to a non-existent location -> error, LLM handles it."""
 
     def test_unknown_location_error_recovery(self, system):
         planner, executor = system
 
         # LLM tries to navigate to 'library' (doesn't exist)
-        nav_block = _make_tool_block("navigate_to", {"location_name": "library"})
-        nav_resp = _make_response("tool_use", [nav_block])
+        tc = _make_tool_call("navigate_to", {"location_name": "library"})
+        nav_resp = _make_response("tool_calls", tool_calls=[tc])
 
         # LLM sees the error and responds with text
-        text = _make_text_block(
-            "I don't know where the library is. Available locations are: "
-            "whiteboard, desk_1, entrance."
+        final_resp = _make_response(
+            "stop",
+            content="I don't know where the library is. Available locations are: "
+                    "whiteboard, desk_1, entrance.",
         )
-        final_resp = _make_response("end_turn", [text])
 
         with patch.object(
-            planner.client.messages,
+            planner.client.chat.completions,
             "create",
             side_effect=[nav_resp, final_resp],
         ):
@@ -184,13 +194,10 @@ class TestTier1Commands:
     def test_tier1_command(self, system, command, expected_target):
         planner, executor = system
 
-        nav_block = _make_tool_block(
-            "navigate_to", {"location_name": expected_target}
-        )
-        nav_resp = _make_response("tool_use", [nav_block])
+        tc = _make_tool_call("navigate_to", {"location_name": expected_target})
+        nav_resp = _make_response("tool_calls", tool_calls=[tc])
 
-        text = _make_text_block(f"Arrived at {expected_target}.")
-        final_resp = _make_response("end_turn", [text])
+        final_resp = _make_response("stop", content=f"Arrived at {expected_target}.")
 
         results = []
 
@@ -200,7 +207,7 @@ class TestTier1Commands:
             return result
 
         with patch.object(
-            planner.client.messages,
+            planner.client.chat.completions,
             "create",
             side_effect=[nav_resp, final_resp],
         ):

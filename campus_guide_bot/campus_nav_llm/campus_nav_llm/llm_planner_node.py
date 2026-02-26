@@ -1,15 +1,17 @@
 """LLM Planner Node — Phase 1 MVP.
 
-Receives user natural language input, runs Claude Tool Call loop,
-publishes tool commands to Task Executor, receives results.
+Receives user natural language input, runs LLM Tool Call loop via
+OpenRouter (OpenAI-compatible API), publishes tool commands to Task
+Executor, receives results.
 
 Phase 1 tools: navigate_to, get_robot_position, speak
 """
 import json
+import os
 import threading
 import logging
 
-import anthropic
+from openai import OpenAI
 
 from campus_nav_llm.location_resolver import LocationResolver, load_semantic_map
 
@@ -17,40 +19,49 @@ logger = logging.getLogger(__name__)
 
 MAX_TOOL_ITERATIONS = 10
 
-# Phase 1: 3 tools only
+# Phase 1: 3 tools (OpenAI function calling format)
 TOOLS = [
     {
-        "name": "navigate_to",
-        "description": (
-            "Navigate to a named location from the semantic map. "
-            "The location must exist in the map. Use exact location "
-            "names or known aliases."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "location_name": {
-                    "type": "string",
-                    "description": "Name or alias of the target location",
-                }
+        "type": "function",
+        "function": {
+            "name": "navigate_to",
+            "description": (
+                "Navigate to a named location from the semantic map. "
+                "The location must exist in the map. Use exact location "
+                "names or known aliases."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location_name": {
+                        "type": "string",
+                        "description": "Name or alias of the target location",
+                    }
+                },
+                "required": ["location_name"],
             },
-            "required": ["location_name"],
         },
     },
     {
-        "name": "get_robot_position",
-        "description": "Get the robot's current (x, y, theta) position on the map.",
-        "input_schema": {"type": "object", "properties": {}},
+        "type": "function",
+        "function": {
+            "name": "get_robot_position",
+            "description": "Get the robot's current (x, y, theta) position on the map.",
+            "parameters": {"type": "object", "properties": {}},
+        },
     },
     {
-        "name": "speak",
-        "description": "Say something to the user (status update, greeting, confirmation, etc.)",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "text": {"type": "string", "description": "Text to say to the user"}
+        "type": "function",
+        "function": {
+            "name": "speak",
+            "description": "Say something to the user (status update, greeting, confirmation, etc.)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Text to say to the user"}
+                },
+                "required": ["text"],
             },
-            "required": ["text"],
         },
     },
 ]
@@ -59,17 +70,21 @@ TOOLS = [
 class LLMPlannerCore:
     """Core LLM planner logic — no ROS dependency.
 
-    This class manages the Claude API Tool Call loop.
+    This class manages the LLM Tool Call loop via OpenRouter.
     Tool execution is delegated via the `tool_executor` callback.
     """
 
     def __init__(
         self,
         semantic_map: dict,
-        model: str = "claude-sonnet-4-6",
+        model: str = "anthropic/claude-sonnet-4-6",
         api_key: str | None = None,
+        base_url: str = "https://openrouter.ai/api/v1",
     ):
-        self.client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
+        self.client = OpenAI(
+            api_key=api_key or os.environ.get("OPENROUTER_API_KEY", ""),
+            base_url=base_url,
+        )
         self.model = model
         self.resolver = LocationResolver(semantic_map)
         self.conversation_history: list[dict] = []
@@ -98,7 +113,7 @@ class LLMPlannerCore:
         user_input: str,
         tool_executor: callable,
     ) -> str:
-        """Run the Claude Tool Call loop for a user input.
+        """Run the LLM Tool Call loop for a user input.
 
         Args:
             user_input: Natural language command from user.
@@ -117,67 +132,62 @@ class LLMPlannerCore:
                 self.conversation_history = self.conversation_history[-20:]
             messages = list(self.conversation_history)
 
-        system = self.build_system_prompt()
+        system_prompt = self.build_system_prompt()
 
         for iteration in range(MAX_TOOL_ITERATIONS):
             try:
-                response = self.client.messages.create(
+                api_messages = [
+                    {"role": "system", "content": system_prompt}
+                ] + messages
+
+                response = self.client.chat.completions.create(
                     model=self.model,
                     max_tokens=1024,
                     tools=TOOLS,
-                    system=system,
-                    messages=messages,
+                    messages=api_messages,
                 )
             except Exception as e:
                 error_msg = f"LLM API error: {e}"
                 logger.error(error_msg)
                 return error_msg
 
-            # end_turn: LLM is done, extract text reply
-            if response.stop_reason == "end_turn":
-                reply = next(
-                    (b.text for b in response.content if hasattr(b, "text")),
-                    "Done.",
-                )
+            choice = response.choices[0]
+
+            # stop: LLM is done, extract text reply
+            if choice.finish_reason == "stop":
+                reply = choice.message.content or "Done."
                 with self._lock:
                     self.conversation_history.append(
                         {"role": "assistant", "content": reply}
                     )
                 return reply
 
-            # tool_use: execute tool(s) and continue loop
-            if response.stop_reason == "tool_use":
-                messages.append(
-                    {"role": "assistant", "content": response.content}
-                )
-                tool_results = []
-                for block in response.content:
-                    if block.type != "tool_use":
-                        continue
+            # tool_calls: execute tool(s) and continue loop
+            if choice.finish_reason == "tool_calls":
+                # Append assistant message with tool calls
+                messages.append(choice.message.model_dump())
 
+                for tc in choice.message.tool_calls:
                     logger.info(
                         "[%d/%d] Tool: %s(%s)",
                         iteration + 1,
                         MAX_TOOL_ITERATIONS,
-                        block.name,
-                        json.dumps(block.input),
+                        tc.function.name,
+                        tc.function.arguments,
                     )
 
                     # Execute tool via callback
                     try:
-                        result = tool_executor(block.name, block.input)
+                        tool_input = json.loads(tc.function.arguments)
+                        result = tool_executor(tc.function.name, tool_input)
                     except Exception as e:
                         result = {"error": str(e)}
 
-                    tool_results.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": json.dumps(result),
-                        }
-                    )
-
-                messages.append({"role": "user", "content": tool_results})
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": json.dumps(result),
+                    })
 
         return "I could not complete the task within the step limit."
 

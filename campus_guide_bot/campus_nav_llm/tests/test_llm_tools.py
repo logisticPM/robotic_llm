@@ -14,35 +14,35 @@ class TestToolDefinitions:
         assert len(TOOLS) == 3
 
     def test_tool_names(self):
-        names = {t["name"] for t in TOOLS}
+        names = {t["function"]["name"] for t in TOOLS}
         assert names == {"navigate_to", "get_robot_position", "speak"}
 
     def test_navigate_to_has_required_param(self):
-        tool = next(t for t in TOOLS if t["name"] == "navigate_to")
-        schema = tool["input_schema"]
-        assert "location_name" in schema["properties"]
-        assert "location_name" in schema["required"]
+        tool = next(t for t in TOOLS if t["function"]["name"] == "navigate_to")
+        params = tool["function"]["parameters"]
+        assert "location_name" in params["properties"]
+        assert "location_name" in params["required"]
 
     def test_speak_has_required_param(self):
-        tool = next(t for t in TOOLS if t["name"] == "speak")
-        schema = tool["input_schema"]
-        assert "text" in schema["properties"]
-        assert "text" in schema["required"]
+        tool = next(t for t in TOOLS if t["function"]["name"] == "speak")
+        params = tool["function"]["parameters"]
+        assert "text" in params["properties"]
+        assert "text" in params["required"]
 
     def test_get_position_has_no_required(self):
-        tool = next(t for t in TOOLS if t["name"] == "get_robot_position")
-        schema = tool["input_schema"]
-        assert "required" not in schema or len(schema.get("required", [])) == 0
+        tool = next(t for t in TOOLS if t["function"]["name"] == "get_robot_position")
+        params = tool["function"]["parameters"]
+        assert "required" not in params or len(params.get("required", [])) == 0
 
     def test_all_tools_have_description(self):
         for tool in TOOLS:
-            assert "description" in tool
-            assert len(tool["description"]) > 10
+            assert "description" in tool["function"]
+            assert len(tool["function"]["description"]) > 10
 
     def test_all_tools_have_input_schema(self):
         for tool in TOOLS:
-            assert "input_schema" in tool
-            assert tool["input_schema"]["type"] == "object"
+            assert "parameters" in tool["function"]
+            assert tool["function"]["parameters"]["type"] == "object"
 
 
 class TestSystemPrompt:
@@ -101,40 +101,55 @@ class TestConversationHistory:
         assert len(planner.conversation_history) == 20
 
 
+# ── Mock helpers for OpenAI-compatible responses ──
+
+def _make_tool_call(name, arguments, tc_id="tc_1"):
+    """Create a mock OpenAI tool call object."""
+    tc = MagicMock()
+    tc.id = tc_id
+    tc.type = "function"
+    tc.function = MagicMock()
+    tc.function.name = name
+    tc.function.arguments = json.dumps(arguments)
+    return tc
+
+
+def _make_choice(finish_reason, content=None, tool_calls=None):
+    """Create a mock OpenAI choice object."""
+    choice = MagicMock()
+    choice.finish_reason = finish_reason
+    choice.message = MagicMock()
+    choice.message.content = content
+    choice.message.tool_calls = tool_calls
+    choice.message.model_dump = MagicMock(return_value={
+        "role": "assistant",
+        "content": content,
+        "tool_calls": [
+            {"id": tc.id, "type": "function",
+             "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
+            for tc in (tool_calls or [])
+        ] if tool_calls else None,
+    })
+    return choice
+
+
+def _make_response(finish_reason, content=None, tool_calls=None):
+    """Create a mock OpenAI API response."""
+    resp = MagicMock()
+    resp.choices = [_make_choice(finish_reason, content, tool_calls)]
+    return resp
+
+
 class TestToolLoopWithMock:
-    """Test the tool call loop with a mocked Claude API."""
-
-    def _make_mock_response(self, stop_reason, content):
-        """Create a mock Anthropic API response."""
-        response = MagicMock()
-        response.stop_reason = stop_reason
-        response.content = content
-        return response
-
-    def _make_text_block(self, text):
-        block = MagicMock()
-        block.type = "text"
-        block.text = text
-        return block
-
-    def _make_tool_use_block(self, tool_name, tool_input, tool_id="tool_1"):
-        block = MagicMock()
-        block.type = "tool_use"
-        block.name = tool_name
-        block.input = tool_input
-        block.id = tool_id
-        return block
+    """Test the tool call loop with a mocked OpenRouter API."""
 
     def test_simple_text_response(self, sample_semantic_map):
-        """LLM returns text without tools → immediate reply."""
+        """LLM returns text without tools -> immediate reply."""
         planner = LLMPlannerCore(sample_semantic_map, api_key="fake")
 
-        text_block = self._make_text_block("I'll go to the whiteboard!")
-        mock_response = self._make_mock_response(
-            "end_turn", [text_block]
-        )
+        mock_response = _make_response("stop", content="I'll go to the whiteboard!")
 
-        with patch.object(planner.client.messages, "create", return_value=mock_response):
+        with patch.object(planner.client.chat.completions, "create", return_value=mock_response):
             result = planner.run_tool_loop("go to whiteboard", lambda n, i: {})
             assert result == "I'll go to the whiteboard!"
 
@@ -142,18 +157,15 @@ class TestToolLoopWithMock:
         """LLM calls navigate_to, gets result, then returns text."""
         planner = LLMPlannerCore(sample_semantic_map, api_key="fake")
 
-        # First response: tool_use
-        tool_block = self._make_tool_use_block(
-            "navigate_to", {"location_name": "whiteboard"}
-        )
-        tool_response = self._make_mock_response("tool_use", [tool_block])
+        # First response: tool_calls
+        tc = _make_tool_call("navigate_to", {"location_name": "whiteboard"})
+        tool_response = _make_response("tool_calls", tool_calls=[tc])
 
-        # Second response: end_turn text
-        text_block = self._make_text_block("Arrived at the whiteboard!")
-        text_response = self._make_mock_response("end_turn", [text_block])
+        # Second response: stop with text
+        text_response = _make_response("stop", content="Arrived at the whiteboard!")
 
         with patch.object(
-            planner.client.messages,
+            planner.client.chat.completions,
             "create",
             side_effect=[tool_response, text_response],
         ):
@@ -173,7 +185,7 @@ class TestToolLoopWithMock:
         planner = LLMPlannerCore(sample_semantic_map, api_key="fake")
 
         with patch.object(
-            planner.client.messages,
+            planner.client.chat.completions,
             "create",
             side_effect=Exception("API rate limit"),
         ):
@@ -185,13 +197,11 @@ class TestToolLoopWithMock:
         """If LLM keeps calling tools, loop should stop at MAX_TOOL_ITERATIONS."""
         planner = LLMPlannerCore(sample_semantic_map, api_key="fake")
 
-        tool_block = self._make_tool_use_block(
-            "get_robot_position", {}
-        )
-        tool_response = self._make_mock_response("tool_use", [tool_block])
+        tc = _make_tool_call("get_robot_position", {})
+        tool_response = _make_response("tool_calls", tool_calls=[tc])
 
         with patch.object(
-            planner.client.messages,
+            planner.client.chat.completions,
             "create",
             return_value=tool_response,
         ):

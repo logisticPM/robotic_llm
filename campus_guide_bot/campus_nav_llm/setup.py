@@ -19,7 +19,7 @@ setup(
         ("share/" + package_name + "/semantic", glob.glob("semantic/*.json")),
     ],
     install_requires=[
-        "anthropic",
+        "openai",
         "jsonschema",
         "pyyaml",
     ],
