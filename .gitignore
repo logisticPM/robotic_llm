@@ -1,0 +1,6 @@
+.env
+*.pyc
+__pycache__/
+.pytest_cache/
+spatial_memory.json
+results/

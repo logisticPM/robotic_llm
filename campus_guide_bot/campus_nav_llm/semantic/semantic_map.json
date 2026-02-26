@@ -1,0 +1,54 @@
+{
+  "map_metadata": {
+    "map_file": "my_map.pgm",
+    "resolution": 0.05,
+    "origin": [
+      -7.47,
+      -8.74,
+      1.0
+    ],
+    "annotated_date": "2026-02-26"
+  },
+  "locations": {
+    "table_1": {
+      "x": 5.93,
+      "y": -3.14,
+      "facing_deg": 270.0,
+      "description": "Student table nearest to the front door, right side of the classroom",
+      "aliases": ["desk 1", "first table", "table near door"],
+      "area": "right_side"
+    },
+    "table_2": {
+      "x": 5.68,
+      "y": -5.09,
+      "facing_deg": 270.0,
+      "description": "Student table between table 1 and table 3, against the wall with a chair",
+      "aliases": ["desk 2", "middle table", "second table"],
+      "area": "right_side"
+    },
+    "table_3": {
+      "x": 4.88,
+      "y": -7.04,
+      "facing_deg": 270.0,
+      "description": "Student table on the corner, near table 2, with a chair",
+      "aliases": ["desk 3", "corner table", "third table"],
+      "area": "corner"
+    },
+    "front_door": {
+      "x": 6.03,
+      "y": 0.31,
+      "facing_deg": 0.0,
+      "description": "Front entrance door of the classroom",
+      "aliases": ["entrance", "main door", "door", "front entrance"],
+      "area": "entrance"
+    },
+    "back_door": {
+      "x": -0.87,
+      "y": 1.61,
+      "facing_deg": 180.0,
+      "description": "Back exit door of the classroom",
+      "aliases": ["rear door", "back entrance", "exit", "back exit"],
+      "area": "back"
+    }
+  }
+}
