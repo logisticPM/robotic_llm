@@ -7,15 +7,12 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, TimerAction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from ament_index_python.packages import get_package_share_directory
 import os
 
 
 def generate_launch_description():
-    pkg_share = os.path.join(
-        os.environ.get("AMENT_PREFIX_PATH", ""),
-        "share",
-        "campus_nav_llm",
-    )
+    pkg_share = get_package_share_directory("campus_nav_llm")
 
     default_map = os.path.join(pkg_share, "semantic", "semantic_map.json")
 
